@@ -7,6 +7,9 @@ from .middleware import (
                         MessageMiddlewareQueue,
                         )
 
+# Limite por consumidor de mensajes sin ACK
+PREFETCH_COUNT = 1
+
 # Helpers 
 
 # Wrapper para invocar el start_consuming dado que la funcion de callback no tiene los parametros requeridos por pika
@@ -87,6 +90,8 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         self._is_consuming = True
 
         try:
+
+            self.channel.basic_qos(prefetch_count=PREFETCH_COUNT)
 
             self.channel.basic_consume(queue=self.queue_name, 
                                         on_message_callback=_wrap_callback(self.channel, on_message_callback))

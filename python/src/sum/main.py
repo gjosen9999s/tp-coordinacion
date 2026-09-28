@@ -15,6 +15,17 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 class SumFilter:
     def __init__(self):
+
+        # Nuevo Exchange para el manejo del mensaje EOF
+        self.eof_publish_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
+        )  # la usa el hilo de datos para retransmitir (send)
+        
+        self.eof_consume_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
+        )  # la use el hilo del exchange para consumir (start_consuming)
+
+         
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
@@ -24,40 +35,72 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
+        
+        self.amount_by_fruit_by_client = {}
 
-    def _process_data(self, fruit, amount):
+        self.lock = threading.Lock()
+
+    def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data")
-        self.amount_by_fruit[fruit] = self.amount_by_fruit.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self):
-        logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit.values():
+        with self.lock:
+            amount_by_fruit = self.amount_by_fruit_by_client.setdefault(client_id, {})
+            amount_by_fruit[fruit] = amount_by_fruit.get(
+                fruit, fruit_item.FruitItem(fruit, 0)
+            ) + fruit_item.FruitItem(fruit, int(amount))
+
+    def _process_eof(self, client_id):
+        logging.info(f"Broadcasting data messages from {client_id}")
+
+        with self.lock:
+            # Recurso compartido
+            amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
+
+        for final_fruit_item in amount_by_fruit.values():
             for data_output_exchange in self.data_output_exchanges:
                 data_output_exchange.send(
                     message_protocol.internal.serialize(
-                        [final_fruit_item.fruit, final_fruit_item.amount]
+                        message_protocol.internal.data_message(
+                            client_id,
+                            final_fruit_item.fruit,
+                            final_fruit_item.amount,
+                        )
                     )
                 )
 
-        logging.info(f"Broadcasting EOF message")
+        logging.info(f"Broadcasting EOF message from {client_id}")
         for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([]))
-
+            data_output_exchange.send(
+                message_protocol.internal.serialize(
+                    message_protocol.internal.eof_message(client_id)
+                )
+            )
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
-            self._process_data(*fields)
+        if fields["type"] == message_protocol.internal.MsgType.EOF:
+            # Si encuentro EOF lo republico al Exchange compartido de todos los SUM
+            self.eof_publish_exchange.send(
+                message_protocol.internal.serialize(
+                    message_protocol.internal.eof_message(fields["client_id"])
+                )
+            )
         else:
-            self._process_eof(*fields)
+            self._process_data(fields["client_id"], fields["fruit"], fields["amount"])
+
+        ack()
+
+    # Helper
+    def _broadcast_eof(self, message, ack, nack):
+        fields = message_protocol.internal.deserialize(message)
+        self._process_eof(fields["client_id"])
         ack()
 
     def start(self):
+        threading.Thread(target=self.eof_consume_exchange.start_consuming,
+                 args=(self._broadcast_eof,), daemon=True).start()    
         self.input_queue.start_consuming(self.process_data_messsage)
-
+        
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
