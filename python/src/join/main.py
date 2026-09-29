@@ -14,19 +14,52 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 
 
 class JoinFilter:
-
     def __init__(self):
-        self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, INPUT_QUEUE
-        )
-        self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
-            MOM_HOST, OUTPUT_QUEUE
-        )
+            self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, INPUT_QUEUE
+            )
+            self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, OUTPUT_QUEUE
+            )
+            # TOPs parciales por sesion: si fuera una lista sola, la combinacion de
+            # un cliente terminaria mezclada con la de los demas.
+            self.partials_by_client = {}
+
+    def _combine(self, partials):
+        combined = [
+            fruit_item.FruitItem(fruit, amount)
+            for partial in partials
+            for (fruit, amount) in partial
+        ]
+    
+        combined.sort(reverse=True)
+        return [(item.fruit, item.amount) for item in combined[:TOP_SIZE]]
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        logging.info("Received partial top")
+        fields = message_protocol.internal.deserialize(message)
+        client_id = fields["client_id"]
+
+        partials = self.partials_by_client.setdefault(client_id, [])
+        partials.append(fields["top"])
+
+        if len(partials) == AGGREGATION_AMOUNT:
+            logging.info(f"Complete top from every Aggregator for {client_id}")
+            final_top = self._combine(partials)
+            
+            del self.partials_by_client[client_id]
+            self.output_queue.send(
+                message_protocol.internal.serialize(
+                    message_protocol.internal.top_message(client_id, final_top)
+                )
+            )
+        else:
+            logging.info(
+                f"Partial top from {client_id} "
+                f"({len(partials)}/{AGGREGATION_AMOUNT}) - "
+                f"still missing the other Aggregators"
+            )
+
         ack()
 
     def start(self):

@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import zlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -13,6 +14,10 @@ SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
+# Distribucion de frutas a agregadores (N : 1)
+def _aggregation_index(fruit):
+    return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
+
 class SumFilter:
     def __init__(self):
 
@@ -23,7 +28,7 @@ class SumFilter:
         
         self.eof_consume_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
-        )  # la use el hilo del exchange para consumir (start_consuming)
+        )  # la usa el hilo del exchange para consumir (start_consuming)
 
          
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -50,24 +55,27 @@ class SumFilter:
             ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _process_eof(self, client_id):
-        logging.info(f"Broadcasting data messages from {client_id}")
+        logging.info(f"Sending partial totals from {client_id}")
 
         with self.lock:
             # Recurso compartido
             amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
 
         for final_fruit_item in amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        message_protocol.internal.data_message(
-                            client_id,
-                            final_fruit_item.fruit,
-                            final_fruit_item.amount,
-                        )
+            # Se envia al agregator correspondiente segun el criterio de division 
+            self.data_output_exchanges[
+                _aggregation_index(final_fruit_item.fruit)
+            ].send(
+                message_protocol.internal.serialize(
+                    message_protocol.internal.data_message(
+                        client_id,
+                        final_fruit_item.fruit,
+                        final_fruit_item.amount,
                     )
                 )
+            )
 
+        # EOF a los aggregator
         logging.info(f"Broadcasting EOF message from {client_id}")
         for data_output_exchange in self.data_output_exchanges:
             data_output_exchange.send(

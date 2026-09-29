@@ -24,4 +24,7 @@ class MessageHandler:
 
     def deserialize_result_message(self, message):
         fields = message_protocol.internal.deserialize(message)
+        if fields["client_id"] != self.client_id:
+            # Excluye tops que no son de la sesion actual
+            return []
         return fields["top"]

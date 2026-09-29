@@ -1,6 +1,5 @@
 import os
 import logging
-import bisect
 
 from common import middleware, message_protocol, fruit_item
 
@@ -23,26 +22,16 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        # TOP y contador por client = sesion
-        self.fruit_top_by_client = {}
+        self.partial_sum_by_client = {}
         self.eof_count_by_client = {}
-
-
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
 
-        fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
-        for i in range(len(fruit_top)):
-            if fruit_top[i].fruit == fruit:
-                # 
-                bisect.insort(
-                    fruit_top,
-                    fruit_top.pop(i) + fruit_item.FruitItem(fruit, amount),
-                )
-                return
-        bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
-
+        amount_by_fruit = self.partial_sum_by_client.setdefault(client_id, {})
+        previous = amount_by_fruit.get(fruit)
+        incoming = fruit_item.FruitItem(fruit, amount)
+        amount_by_fruit[fruit] = incoming if previous is None else previous + incoming
 
     def _process_eof(self, client_id):
         eof_count = self.eof_count_by_client.get(client_id, 0) + 1
@@ -55,17 +44,10 @@ class AggregationFilter:
             return
 
         logging.info(f"EOF from every Sum for {client_id} - sending result")
-        fruit_top = self.fruit_top_by_client.pop(client_id, [])
-        fruit_chunk = list(fruit_top[-TOP_SIZE:])
-        fruit_chunk.reverse()
-        fruit_top_result = list(
-            map(
-                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                fruit_chunk,
-            )
-        )
+        partial_sum = self.partial_sum_by_client.pop(client_id, {})
+        top = sorted(partial_sum.values(), reverse=True)[:TOP_SIZE]
+        fruit_top_result = [(item.fruit, item.amount) for item in top]
 
-        
         self.output_queue.send(
             message_protocol.internal.serialize(
                 message_protocol.internal.top_message(client_id, fruit_top_result)
@@ -73,7 +55,6 @@ class AggregationFilter:
         )
         # Borro el count x sesion para que no crezca la memoria sin liberar
         del self.eof_count_by_client[client_id]
-
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
