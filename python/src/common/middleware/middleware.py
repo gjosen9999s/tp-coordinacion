@@ -38,6 +38,11 @@ class MessageMiddleware(ABC):
     def stop_consuming(self):
         pass
 
+    # Misma logica que stop_consuming pero con soporte thread safe
+    @abstractmethod
+    def stop_consuming_threadsafe(self):
+        pass
+    
     # Envía un mensaje a la cola o al tópico con el que se inicializó el exchange.
     # Si se pierde la conexión con el middleware eleva MessageMiddlewareDisconnectedError.
     # Si ocurre un error interno que no puede resolverse eleva MessageMiddlewareMessageError.
@@ -51,7 +56,7 @@ class MessageMiddleware(ABC):
     def close(self):
         pass
 
-
+    
 class MessageMiddlewareExchange(MessageMiddleware):
     @abstractmethod
     def __init__(self, host, exchange_name, route_keys):

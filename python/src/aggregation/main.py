@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -53,7 +54,7 @@ class AggregationFilter:
                 message_protocol.internal.top_message(client_id, fruit_top_result)
             )
         )
-        # Borro el count x sesion para que no crezca la memoria sin liberar
+
         del self.eof_count_by_client[client_id]
 
     def process_messsage(self, message, ack, nack):
@@ -68,11 +69,27 @@ class AggregationFilter:
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
 
+    def stop(self):
+        logging.info("SIGTERM recibido, detengo los consumidores")
+        self.input_exchange.stop_consuming_threadsafe()
+
+    def close(self):
+        # Orden inverso al del init, no se borra la cola porque se comparte
+        self.output_queue.close()
+        self.input_exchange.close()
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
-    aggregation_filter.start()
+    
+    signal.signal(signal.SIGTERM, lambda signum, frame: aggregation_filter.stop())
+    
+    try:
+        aggregation_filter.start()
+    finally:
+        aggregation_filter.close()
+    
     return 0
 
 

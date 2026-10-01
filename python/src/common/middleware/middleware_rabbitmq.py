@@ -147,6 +147,20 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
         except Exception as e:
             raise MessageMiddlewareCloseError() from e
+
+    #En el caso que se pide detener el consumo desde un hilo distinto al que esta usando el canal.
+    #Se usa add_callback_threadsafe encola la orden para que la ejecute el hilo dueño de la conexion. 
+    def stop_consuming_threadsafe(self):
+
+        if not self.connection.is_open:
+            return
+
+        try:
+
+            self.connection.add_callback_threadsafe(self.channel.stop_consuming)
+
+        except pika.exceptions.AMQPError as e:
+            _handle_pika_error(e)
     
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     
@@ -295,3 +309,15 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
 
         except Exception as e:
             raise MessageMiddlewareCloseError() from e
+
+    def stop_consuming_threadsafe(self):
+
+        if not self.connection.is_open:
+            return
+
+        try:
+
+            self.connection.add_callback_threadsafe(self.channel.stop_consuming)
+
+        except pika.exceptions.AMQPError as e:
+            _handle_pika_error(e)

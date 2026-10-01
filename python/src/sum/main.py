@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 import zlib
 
@@ -13,15 +14,17 @@ SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
+THREAD_JOIN_TIMEOUT = 10
 
 # Distribucion de frutas a agregadores (N : 1)
-# Decido no usar Hash nativo de python porque no es deterministico. Podria usar HashLib en un futuro.
 def _aggregation_index(fruit):
     return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
 
 class SumFilter:
     def __init__(self):
 
+        self._control_thread = None
+        
         # Exchange de control compartido por todos los SUM. Cada SUM declara la
         # cola de control de todos los demas: asi el exchange tiene destino
         # aunque un SUM todavia no se haya levantado. Evito condicion de carrera por EOF.
@@ -33,12 +36,10 @@ class SumFilter:
                 f"{SUM_PREFIX}_{i}_control"
             )
 
-        # Conexion propia para consumir, porque aun no uso las posibilidades threadsafe de pika
-        # consumo de control corre en un hilo aparte del de datos.
         self.eof_consume_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE],
             queue_name=f"{SUM_PREFIX}_{ID}_control"
-        )  # la usa el hilo del exchange para consumir (start_consuming)
+        )
 
          
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -94,7 +95,7 @@ class SumFilter:
                 )
             )
 
-    def process_data_messsage(self, message, ack, nack):
+    def process_data_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if fields["type"] == message_protocol.internal.MsgType.EOF:
             # Si encuentro EOF lo republico al Exchange compartido de todos los SUM
@@ -115,16 +116,41 @@ class SumFilter:
         ack()
 
     def start(self):
-        threading.Thread(target=self.eof_consume_exchange.start_consuming,
-                 args=(self._broadcast_eof,), daemon=True).start()    
-        self.input_queue.start_consuming(self.process_data_messsage)
-        
+        self._control_thread = threading.Thread(
+            target=self.eof_consume_exchange.start_consuming,
+            args=(self._broadcast_eof,))
+        self._control_thread.start()
+        self.input_queue.start_consuming(self.process_data_message)
+
+    def stop(self):
+        logging.info("SIGTERM recibido, detengo los consumidores")
+        self.input_queue.stop_consuming_threadsafe()
+        self.eof_consume_exchange.stop_consuming_threadsafe()
+
+    def close(self):
+        # El hilo de control puede seguir vivo lo espero antes de cerrarle la conexion
+        if self._control_thread is not None:
+            self._control_thread.join(timeout=THREAD_JOIN_TIMEOUT)
+
+        # Orden inverso al del init, no se borra la cola porque se comparte
+        for data_output_exchange in self.data_output_exchanges:
+            data_output_exchange.close()
+        self.input_queue.close()
+        self.eof_consume_exchange.close()
+        self.eof_publish_exchange.close()
+
+    
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
-    sum_filter.start()
+    
+    signal.signal(signal.SIGTERM, lambda signum, frame: sum_filter.stop())
+    
+    try:
+        sum_filter.start()
+    finally:
+        sum_filter.close()
     return 0
-
 
 if __name__ == "__main__":
     main()
