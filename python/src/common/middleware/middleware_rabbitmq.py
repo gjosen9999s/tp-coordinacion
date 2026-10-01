@@ -150,13 +150,20 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
     
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     
-    def __init__(self, host, exchange_name, routing_keys):
+    def __init__(self, host, exchange_name, routing_keys, queue_name=None):
 
         connection = None
         channel = None 
 
         self._is_consuming = False
-        self.queue_name = None
+        self.queue_name = queue_name
+
+        #Si la cola viene por parametro la comparten varios procesos, asi que
+        #este middleware no es dueño de ella y no debe borrarla.
+        if self.queue_name is None:
+            self._is_anonymous_queue = True
+        else: 
+            self._is_anonymous_queue = False
 
         try:
 
@@ -173,13 +180,28 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             self.exchange_name = exchange_name
 
             channel.exchange_declare(exchange=self.exchange_name, exchange_type='direct')
-                
+            
+            #Si se pasa queue_name, la cola se declara aca y no en start_consuming.
+            #la cola tiene que existir aunque todavia no haya consumidor y no haya perdida de mensajes.
+            if queue_name is not None:
+                channel.queue_declare(queue=queue_name, durable=True)
+
         except pika.exceptions.AMQPError as e:
             _close_channel_connection(channel, connection)
             _handle_pika_error(e)
 
         self.channel = channel
         self.connection = connection
+
+    #Declara una cola con nombre y durable para que exista aunque no haya
+    #consumidor. Lo usa el publicador para garantizar que el exchange tenga
+    #destino antes de publicar.
+    def declare_queue(self, queue_name):
+
+        try:
+            self.channel.queue_declare(queue=queue_name, durable=True)
+        except pika.exceptions.AMQPError as e:
+            _handle_pika_error(e)
 
     #Comienza a escuchar a la cola/exchange e invoca a on_message_callback tras
     #cada mensaje de datos o de control con el cuerpo del mensaje.
@@ -199,8 +221,11 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         try:
 
             #cola a asociar
-            result = self.channel.queue_declare(queue='', exclusive=True)
-            self.queue_name = result.method.queue
+            #Si no se paso queue_name en el init, la cola se declara aca como
+            #Si se paso, ya existe y solo falta asociarla.
+            if self.queue_name is None:
+                result = self.channel.queue_declare(queue='', exclusive=True)
+                self.queue_name = result.method.queue
 
             #bind
             for routing_key in self.routing_keys:
@@ -214,7 +239,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
 
         except pika.exceptions.AMQPError as e:
             try:
-                if self.queue_name:
+                if self.queue_name and self._is_anonymous_queue:
                     self.channel.queue_delete(queue=self.queue_name)
             except pika.exceptions.AMQPError:
                 # borrado de cola best-effort, si falla suprimo el error e informo el original

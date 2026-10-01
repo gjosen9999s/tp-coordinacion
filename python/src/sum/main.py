@@ -15,19 +15,29 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 # Distribucion de frutas a agregadores (N : 1)
+# Decido no usar Hash nativo de python porque no es deterministico. Podria usar HashLib en un futuro.
 def _aggregation_index(fruit):
     return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
 
 class SumFilter:
     def __init__(self):
 
-        # Nuevo Exchange para el manejo del mensaje EOF
+        # Exchange de control compartido por todos los SUM. Cada SUM declara la
+        # cola de control de todos los demas: asi el exchange tiene destino
+        # aunque un SUM todavia no se haya levantado. Evito condicion de carrera por EOF.
         self.eof_publish_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
         )  # la usa el hilo de datos para retransmitir (send)
-        
+        for i in range(SUM_AMOUNT):
+            self.eof_publish_exchange.declare_queue(
+                f"{SUM_PREFIX}_{i}_control"
+            )
+
+        # Conexion propia para consumir, porque aun no uso las posibilidades threadsafe de pika
+        # consumo de control corre en un hilo aparte del de datos.
         self.eof_consume_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE]
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_EXCHANGE],
+            queue_name=f"{SUM_PREFIX}_{ID}_control"
         )  # la usa el hilo del exchange para consumir (start_consuming)
 
          
